@@ -1,230 +1,271 @@
 # Weather-Aware NYC Taxi Data Pipeline
 
-This project builds on the original Uber/Taxi ETL tutorial and turns it into something more useful: a practical analytics pipeline for understanding how weather changes taxi behavior in New York City.
+A local-first batch data platform for NYC yellow taxi analytics enriched with historical weather. The project ingests monthly TLC trip data, fetches hourly weather from Open-Meteo, lands both into PostgreSQL, models the warehouse with dbt, orchestrates the flow with Airflow, and exposes marts designed for Power BI.
 
-Instead of only tracking trip counts, fares, and pickup/dropoff patterns, we focus on questions like:
+This repository started as a notebook prototype. The notebook is still included as reference, but the main implementation is now a reproducible pipeline with raw, staging, and mart layers.
 
-- How much do rain and snow change trip demand?
-- Do bad weather conditions increase average fare or trip duration?
-- Are some boroughs more weather-sensitive than others?
-- How does weather interact with rush-hour demand?
+## Project Overview
 
----
+Business questions this pipeline answers:
 
-## Project Goal
+- How does rain or snow change hourly taxi demand?
+- Which pickup zones generate the most revenue?
+- Do bad weather conditions increase fare, trip duration, or rush-hour stress?
+- Which boroughs are most weather-sensitive?
 
-Move from a basic ETL demo to an analysis-ready pipeline that supports real business questions with clear metrics and reproducible data modeling.
+## Architecture
 
----
+```mermaid
+flowchart LR
+    A["TLC Yellow Taxi Monthly Parquet"] --> B["Python ingestion"]
+    C["Open-Meteo archive API"] --> B
+    D["TLC zone lookup CSV"] --> B
+    B --> E["data/raw"]
+    E --> F["Python preprocessing"]
+    F --> G["data/processed CSV"]
+    G --> H["PostgreSQL raw schema"]
+    H --> I["dbt staging models"]
+    I --> J["dbt mart models"]
+    J --> K["Power BI dashboards"]
+    L["Airflow DAG"] --> B
+    L --> F
+    L --> H
+    L --> I
+    L --> J
+```
+
+## Tech Stack
+
+- Python
+- SQL
+- Docker and Docker Compose
+- Apache Airflow
+- dbt
+- PostgreSQL
+- Power BI
 
 ## Data Sources
 
-### 1) NYC Taxi Trips
+### NYC Taxi Trips
 
-Use TLC Yellow Taxi monthly parquet files first (Green/FHV can be added later).
+- Source: TLC yellow taxi monthly parquet files
+- Example source pattern: `yellow_tripdata_YYYY-MM.parquet`
+- Scale target: designed for monthly loads that can exceed 10M rows
 
-Typical fields:
-- `pickup_datetime`
-- `dropoff_datetime`
-- `PULocationID`
-- `DOLocationID`
-- `trip_distance`
-- `fare_amount`
-- `tip_amount`
-- `total_amount`
-- `passenger_count`
+### Historical Weather
 
-### 2) Historical Weather (Open-Meteo Archive API)
+- Source: Open-Meteo archive API
+- Grain: hourly
+- Coverage: one anchor point per NYC borough
 
-Weather data comes from `archive-api.open-meteo.com`.
+### Taxi Zone Lookup
 
-Key query parameters:
-- `latitude`, `longitude`
-- `start_date`, `end_date`
-- `hourly=temperature_2m,precipitation,rain,snowfall,windspeed_10m,weathercode`
-- `timezone=America/New_York`
+- Source: TLC taxi zone lookup CSV
+- Purpose: maps pickup and dropoff location ids to borough and zone
 
-Example request:
+## Weather Join Strategy
 
-```bash
-curl "https://archive-api.open-meteo.com/v1/archive?latitude=40.7831&longitude=-73.9712&start_date=2023-01-01&end_date=2023-01-31&hourly=temperature_2m,precipitation,rain,snowfall,windspeed_10m,weathercode&timezone=America/New_York"
-```
+Trips are matched to weather using:
 
-Tip: request weather by borough anchor points and cache responses locally so reruns do not hammer the API.
+- `pickup_hour`
+- pickup borough derived from `PULocationID`
 
----
+This is a practical business-friendly approximation. It avoids heavy geospatial processing while still producing stable analytics for borough-level demand and fare analysis.
 
-## Pipeline Design
-
-### 1) Ingestion
-
-- `taxi_ingest`: load NYC taxi monthly data (partition by `year/month`)
-- `weather_ingest`: call Open-Meteo Archive API at hourly grain (partition by `date/borough`)
-- Save untouched source payloads in raw storage (`data/raw/` or object storage bucket)
-
-### 2) Staging (Cleaning + Standardization)
-
-#### Taxi staging
-- Convert timestamps to `America/New_York`
-- Remove obvious bad records:
-  - `trip_duration <= 0`
-  - `fare_amount < 0`
-  - extreme outliers (for example, cap at P99/P99.5)
-- Add derived columns:
-  - `trip_duration_min`
-  - `pickup_hour`
-  - `pickup_date`
-  - `day_of_week`
-  - `is_weekend`
-
-#### Weather staging
-- Standardized hourly columns:
-  - `weather_ts_hour`
-  - `temperature_2m`
-  - `precipitation_mm`
-  - `rain_mm`
-  - `snowfall_cm`
-  - `wind_speed`
-- Add weather flags:
-  - `is_rain` (`rain_mm > 0`)
-  - `is_snow` (`snowfall_cm > 0`)
-  - `weather_severity` (`clear/light/moderate/severe`)
-
-### 3) Integration (Join Taxi + Weather)
-
-Suggested join keys:
-- Time key: align `pickup_ts` to hourly `pickup_hour`
-- Location key: map `PULocationID -> borough`
-- Weather key: `borough + weather_ts_hour`
-
-Output table:
-- `fact_trip_weather_hourly`
-
-Depending on use case, either:
-- keep trip-level rows with matched weather, or
-- pre-aggregate to `hour x borough` for BI/dashboard speed
-
----
-
-## Recommended Data Model (Star Schema)
-
-- `fact_trip_weather`
-- `dim_datetime`
-- `dim_location` (borough, zone)
-- `dim_weather_condition` (weathercode + severity)
-
-Core metrics:
-- `trip_count`
-- `avg_fare`
-- `avg_trip_duration_min`
-- `avg_speed` (optional, distance / duration)
-- `surge_proxy` (optional, e.g., fare per mile or high-percentile fare)
-
----
-
-## Analysis Questions to Implement in SQL
-
-### Q1. Rain/Snow impact on trip volume
-- Grain: `borough x hour` or `borough x day`
-- Compare: clear vs rain vs snow
-- Output: `trip_count_diff_pct`
-
-### Q2. Does severe weather raise fare/duration?
-- Group by: `weather_severity`
-- Metrics: `avg_fare`, `avg_trip_duration_min`
-- Controls: `hour_of_day`, `borough`, `weekday/weekend`
-
-### Q3. Borough-level weather sensitivity
-- Model idea:
-  - `demand ~ precipitation + snowfall + temperature + fixed_effects`
-- Output: `sensitivity_rank`
-
-### Q4. Rush hour × weather interaction
-- Rush-hour windows: `7-10`, `16-20`
-- Interaction terms:
-  - `is_rush_hour * is_rain`
-  - `is_rush_hour * is_snow`
-- Check whether interaction effects are meaningful
-
----
-
-## Dashboard Suggestions
-
-1. **Weather vs Demand Timeline**
-   - Show `trip_count` and `precipitation` together (single or dual axis)
-2. **Borough Sensitivity Heatmap**
-   - Rows: borough
-   - Columns: weather category
-   - Values: demand change rate
-3. **Rush-Hour Interaction Chart**
-   - Compare peak-hour demand under clear/rain/snow
-4. **Fare & Duration Box Plots**
-   - Show distribution shifts across weather conditions
-
----
-
-## Suggested Repository Layout
+## Repository Structure
 
 ```text
 .
+├── airflow/
+│   ├── dags/
+│   └── requirements.txt
 ├── data/
 │   ├── raw/
-│   │   ├── taxi/
-│   │   └── weather/
-│   └── curated/
-├── pipelines/
-│   ├── ingest_taxi.py
-│   ├── ingest_weather_open_meteo.py
-│   ├── transform_trip_weather.py
-│   └── build_marts.py
+│   ├── processed/
+│   └── external/
+├── dbt/
+│   ├── models/
+│   │   ├── staging/
+│   │   └── marts/
+│   ├── tests/
+│   ├── dbt_project.yml
+│   └── profiles.yml
+├── docs/
+├── powerbi/
 ├── sql/
-│   ├── marts/
-│   └── analysis/
-└── dashboard/
+├── src/
+│   ├── config/
+│   ├── ingestion/
+│   ├── processing/
+│   ├── loaders/
+│   ├── quality/
+│   └── utils/
+├── tests/
+├── Dockerfile
+├── docker-compose.yml
+└── README.md
 ```
 
----
+## Warehouse Data Model
 
-## Orchestration and Data Quality
+### Raw Layer
 
-Example DAG flow:
-- `DAG 1`: `taxi_ingest -> taxi_stage`
-- `DAG 2`: `weather_ingest -> weather_stage`
-- `DAG 3`: `join_trip_weather -> marts -> BI refresh`
+- `raw.taxi_trips_yellow`
+- `raw.weather_hourly`
+- `raw.taxi_zone_lookup`
 
-Suggested quality checks:
-- `not_null` on time and location keys
-- `accepted_range` for fare, duration, temperature
-- weather data freshness threshold
-- daily trip-count anomaly detection
+### Staging Layer
 
----
+- `staging.stg_taxi_trips`
+- `staging.stg_weather_hourly`
+- `staging.stg_locations`
 
-## Rollout Plan
+### Mart Layer
 
-### Phase 1 (1-2 days)
-- Integrate Open-Meteo Archive API
-- Build `hour x borough` joined dataset
-- Deliver one working dashboard page
+Dimensions:
 
-### Phase 2 (3-5 days)
-- Add borough weather-sensitivity analysis
-- Add rush-hour interaction metrics
-- Add monitoring and quality gates
+- `mart.dim_date_time`
+- `mart.dim_location`
+- `mart.dim_weather`
 
-### Phase 3 (optional)
-- Add weather forecast source for short-term demand forecasting
-- Add extreme-weather event analysis (snowstorms, heavy rain)
+Facts:
 
----
+- `mart.fct_taxi_trips`
+- `mart.fct_hourly_demand`
+- `mart.fct_fare_revenue`
+- `mart.fct_weather_impact`
 
-## Fastest Way to Start
+## Data Quality Checks
 
-1. Run one month first (for example: `2023-01`)
-2. Limit scope to Manhattan + Brooklyn for the PoC
-3. Build three charts first:
-   - `trip_count vs precipitation`
-   - `avg_fare by weather_type`
-   - `rush_hour interaction`
+Operational checks in Python:
 
-This is usually enough to validate whether weather adds real analytical value beyond a standard ETL tutorial.
+- source file exists
+- expected processed files exist
+- processed row counts are not suspiciously low
+- required source columns are present
+
+dbt tests and SQL assertions:
+
+- `not_null`
+- `unique`
+- `accepted_values`
+- `relationships`
+- invalid trip range assertions
+- weather join coverage threshold
+- hourly aggregate consistency against trip-level fact
+
+## How to Run
+
+### 1. Set up environment variables
+
+```bash
+Copy-Item .env.example .env
+```
+
+### 2. Start the local platform
+
+```bash
+docker compose up airflow-init
+docker compose up -d postgres airflow-webserver airflow-scheduler
+```
+
+Airflow UI:
+
+- URL: `http://localhost:8080`
+- username: `admin`
+- password: `admin`
+
+### 3. Run the pipeline manually
+
+From inside the Airflow container:
+
+```bash
+docker compose exec airflow-webserver python -m src.pipeline run-month --month 2025-01
+```
+
+### 4. Run the Airflow DAG
+
+- DAG id: `weather_aware_taxi_pipeline`
+- Optional runtime config:
+
+```json
+{
+  "month": "2025-01"
+}
+```
+
+If you do not pass a month, the DAG defaults to the previous calendar month.
+
+## dbt Commands
+
+```bash
+docker compose exec airflow-webserver dbt run --project-dir dbt --profiles-dir dbt
+docker compose exec airflow-webserver dbt test --project-dir dbt --profiles-dir dbt
+```
+
+## Tests
+
+Python unit tests:
+
+```bash
+docker compose exec airflow-webserver pytest tests
+```
+
+Pipeline quality checks:
+
+```bash
+docker compose exec airflow-webserver python -m src.quality.checks raw --month 2025-01
+docker compose exec airflow-webserver python -m src.quality.checks warehouse --month 2025-01
+```
+
+## Airflow + dbt Workflow
+
+The DAG runs these steps:
+
+1. Resolve target month
+2. Download taxi data, weather data, and zone lookup
+3. Normalize raw files into processed CSVs
+4. Run raw data quality checks
+5. Load raw tables into PostgreSQL
+6. Run dbt models
+7. Run dbt tests
+8. Run warehouse-level quality checks
+
+## Output Tables for Analytics
+
+- `mart.fct_hourly_demand` for hourly trend analysis
+- `mart.fct_fare_revenue` for fare and revenue reporting
+- `mart.fct_weather_impact` for weather comparison dashboards
+- `mart.fct_taxi_trips` for drillthrough and detailed QA
+
+## Power BI Deliverables
+
+The repository includes:
+
+- `powerbi/README.md`
+- `powerbi/data_model.md`
+- `powerbi/measures.md`
+- `powerbi/dashboard_spec.md`
+
+Use these files to build three dashboard pages:
+
+- Hourly Demand Dashboard
+- Location-Based Mobility Trends
+- Weather Impact Analysis
+
+## Example SQL
+
+See `sql/analysis_queries.sql` for example portfolio queries built against the mart schema.
+
+## Documentation
+
+- architecture notes: `docs/architecture.md`
+- Power BI build guide: `powerbi/README.md`
+
+## Future Improvements
+
+- add green taxi or FHV datasets
+- add forecast weather for forward-looking demand planning
+- add partition-aware incremental dbt models
+- replace borough anchors with polygon or nearest-station weather matching
+- add CI to run dbt tests and unit tests on pull requests

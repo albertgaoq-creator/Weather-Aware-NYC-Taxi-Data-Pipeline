@@ -1,0 +1,63 @@
+version: 2
+
+models:
+  - name: stg_taxi_trips
+    description: Cleaned yellow taxi trips at trip grain with invalid records filtered out.
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+          - unique
+      - name: pickup_ts_local
+        tests:
+          - not_null
+      - name: dropoff_ts_local
+        tests:
+          - not_null
+      - name: pickup_location_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_locations')
+              field: location_id
+      - name: dropoff_location_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_locations')
+              field: location_id
+      - name: payment_type_name
+        tests:
+          - accepted_values:
+              values: ['Credit card', 'Cash', 'No charge', 'Dispute', 'Unknown', 'Voided trip']
+
+  - name: stg_weather_hourly
+    description: Hourly borough-level weather normalized from Open-Meteo archive responses.
+    columns:
+      - name: weather_record_id
+        tests:
+          - not_null
+          - unique
+      - name: borough
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island']
+      - name: weather_ts_hour
+        tests:
+          - not_null
+      - name: weather_severity
+        tests:
+          - accepted_values:
+              values: ['clear', 'light', 'moderate', 'severe']
+
+  - name: stg_locations
+    description: TLC taxi zone lookup with borough and zone names for pickup and dropoff mapping.
+    columns:
+      - name: location_id
+        tests:
+          - not_null
+          - unique
+      - name: zone
+        tests:
+          - not_null

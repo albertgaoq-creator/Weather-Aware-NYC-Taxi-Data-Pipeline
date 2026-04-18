@@ -1,0 +1,82 @@
+version: 2
+
+models:
+  - name: dim_date_time
+    description: Hourly date and time dimension spanning the taxi and weather data range.
+    columns:
+      - name: date_hour_key
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_location
+    description: Taxi zone location dimension for pickup and dropoff analytics.
+    columns:
+      - name: location_id
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_weather
+    description: Weather condition dimension derived from borough-hour weather signals.
+    columns:
+      - name: weather_key
+        tests:
+          - not_null
+          - unique
+      - name: weather_severity
+        tests:
+          - accepted_values:
+              values: ['clear', 'light', 'moderate', 'severe', 'unknown']
+
+  - name: fct_taxi_trips
+    description: Trip-level fact table with pickup-side weather matched at pickup hour and borough.
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+          - unique
+      - name: date_hour_key
+        tests:
+          - relationships:
+              to: ref('dim_date_time')
+              field: date_hour_key
+      - name: pickup_location_id
+        tests:
+          - relationships:
+              to: ref('dim_location')
+              field: location_id
+      - name: dropoff_location_id
+        tests:
+          - relationships:
+              to: ref('dim_location')
+              field: location_id
+      - name: weather_key
+        tests:
+          - relationships:
+              to: ref('dim_weather')
+              field: weather_key
+
+  - name: fct_hourly_demand
+    description: Hourly demand fact used for trip volume trend and peak/off-peak analysis.
+    columns:
+      - name: hourly_demand_key
+        tests:
+          - not_null
+          - unique
+
+  - name: fct_fare_revenue
+    description: Daily fare and revenue fact used for zone-level revenue analysis.
+    columns:
+      - name: fare_revenue_key
+        tests:
+          - not_null
+          - unique
+
+  - name: fct_weather_impact
+    description: Borough-hour weather impact fact for Power BI weather analysis pages.
+    columns:
+      - name: weather_impact_key
+        tests:
+          - not_null
+          - unique

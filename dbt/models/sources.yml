@@ -1,0 +1,37 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: Landed NYC taxi trip, weather, and taxi zone lookup tables.
+    tables:
+      - name: taxi_trips_yellow
+        description: Yellow taxi trips loaded from monthly TLC parquet files.
+        columns:
+          - name: record_hash
+            tests:
+              - not_null
+              - unique
+          - name: pickup_datetime
+            tests:
+              - not_null
+          - name: dropoff_datetime
+            tests:
+              - not_null
+      - name: weather_hourly
+        description: Hourly borough-level weather from Open-Meteo archive responses.
+        columns:
+          - name: weather_record_id
+            tests:
+              - not_null
+              - unique
+          - name: borough
+            tests:
+              - not_null
+      - name: taxi_zone_lookup
+        description: TLC zone lookup table used to map location ids to NYC boroughs and zones.
+        columns:
+          - name: location_id
+            tests:
+              - not_null
+              - unique

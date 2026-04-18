@@ -39,8 +39,20 @@ env/
 .vscode/
 
 # Data and logs
-data/
+data/*
+!data/raw/
+!data/processed/
+!data/external/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/external/.gitkeep
 *.log
+logs/
+airflow/logs/
+dbt/logs/
+dbt/target/
+target/
+.pytest_cache/
 
 # OS files
 .DS_Store
